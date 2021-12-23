@@ -17,6 +17,40 @@ local function RefreshCrypto()
     end
 end
 
+local function ErrorHandle(error)
+    for k, v in pairs(Ticker.Error_handle) do
+        if string.match(error, k) then
+            return v
+        end
+    end
+    return false
+end
+
+local function GetTickerPrice() -- Touch = no help
+    local ticker_promise = promise.new()
+    PerformHttpRequest("https://min-api.cryptocompare.com/data/price?fsym=" .. Ticker.coin .. "&tsyms=" .. Ticker.currency .. '&api_key=' .. Ticker.Api_key, function(Error, Result, Head)
+        local result_obj = json.decode(Result)
+        if not result_obj['Response'] then
+            local this_resolve = {error =  Error, response_data = result_obj[string.upper(Ticker.currency)]}
+            ticker_promise:resolve(this_resolve) --- Could resolve Error aswell for more accurate Error messages? Solved in else
+        else
+            local this_resolve = {error =  result_obj['Message']}
+            ticker_promise:resolve(this_resolve)
+        end
+    end, 'GET')
+    Citizen.Await(ticker_promise)
+    if type(ticker_promise.value.error) ~= 'number' then
+        local get_user_friendly_error = ErrorHandle(ticker_promise.value.error)
+        if get_user_friendly_error then
+            return get_user_friendly_error
+        else
+            return '\27[31m Unexpected error \27[0m' --- Raised an error which we did not expect, script should be capable of sticking with last recorded price and shutting down the sync logic
+        end
+    else
+        return ticker_promise.value.response_data
+    end
+end
+
 local function HandlePriceChance()
     local currentValue = Crypto.Worth[coin]
     local prevValue = Crypto.Worth[coin]
@@ -25,7 +59,7 @@ local function HandlePriceChance()
     local chance = event - Crypto.ChanceOfCrashOrLuck
 
     if event > chance then 
-        if trend <= Crypto.ChanceOfDown then 
+        if trend <= Crypto.ChanceOfDown then
             currentValue = currentValue - math.random(Crypto.CasualDown[1], Crypto.CasualDown[2])
         elseif trend >= Crypto.ChanceOfUp then 
             currentValue = currentValue + math.random(Crypto.CasualUp[1], Crypto.CasualUp[2])
@@ -208,15 +242,15 @@ end)
 
 QBCore.Functions.CreateCallback('qb-crypto:server:BuyCrypto', function(source, cb, data)
     local Player = QBCore.Functions.GetPlayer(source)
-
-    if Player.PlayerData.money.bank >= tonumber(data.Price) then
+    local total_price = tonumber(data.Coins) * tonumber(Crypto.Worth["qbit"])
+    if Player.PlayerData.money.bank >= total_price then
         local CryptoData = {
             History = Crypto.History["qbit"],
             Worth = Crypto.Worth["qbit"],
             Portfolio = Player.PlayerData.money.crypto + tonumber(data.Coins),
             WalletId = Player.PlayerData.metadata["walletid"],
         }
-        Player.Functions.RemoveMoney('bank', tonumber(data.Price))
+        Player.Functions.RemoveMoney('bank', total_price)
         TriggerClientEvent('qb-phone:client:AddTransaction', source, Player, data, "You have "..tonumber(data.Coins).." Qbit('s) purchased!", "Credit")
         Player.Functions.AddMoney('crypto', tonumber(data.Coins))
         cb(CryptoData)
@@ -227,7 +261,7 @@ end)
 
 QBCore.Functions.CreateCallback('qb-crypto:server:SellCrypto', function(source, cb, data)
     local Player = QBCore.Functions.GetPlayer(source)
-
+    
     if Player.PlayerData.money.crypto >= tonumber(data.Coins) then
         local CryptoData = {
             History = Crypto.History["qbit"],
@@ -237,7 +271,7 @@ QBCore.Functions.CreateCallback('qb-crypto:server:SellCrypto', function(source, 
         }
         Player.Functions.RemoveMoney('crypto', tonumber(data.Coins))
         TriggerClientEvent('qb-phone:client:AddTransaction', source, Player, data, "You have "..tonumber(data.Coins).." Qbit('s) sold!", "Depreciation")
-        Player.Functions.AddMoney('bank', tonumber(data.Price))
+        Player.Functions.AddMoney('bank', tonumber(data.Coins) * tonumber(Crypto.Worth["qbit"]))
         cb(CryptoData)
     else
         cb(false)
@@ -293,3 +327,24 @@ CreateThread(function()
         HandlePriceChance()
     end
 end)
+
+-- You touch = you break
+if Ticker.Enabled then
+    Citizen.CreateThread(function()
+        Interval = Ticker.tick_time * 60000
+        if Ticker.tick_time < 2 then
+            Interval = 120000
+        end
+        while(true) do
+            local get_coin_price = GetTickerPrice()
+            if type(get_coin_price) == 'number' then
+                Crypto.Worth["qbit"] = get_coin_price
+            else
+                print('\27[31m' .. get_coin_price .. '\27[0m')
+                Ticker.Enabled = false
+                break
+            end
+            Citizen.Wait(Interval)
+        end
+    end)
+end
